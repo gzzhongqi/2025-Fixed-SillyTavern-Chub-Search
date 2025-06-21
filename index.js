@@ -49,22 +49,20 @@ async function loadSettings() {
 }
 
 /**
- * Downloads a custom character based on the provided URL.
- * @param {string} input - A string containing the URL of the character to be downloaded.
+ * Downloads a custom character based on the provided fullPath.
  * @param {string} fullPath - The full path of the character from search results (e.g., "user/character-name")
  * @returns {Promise<void>} - Resolves once the character has been processed or if an error occurs.
  */
-async function downloadCharacter(input, fullPath = null) {
-    const url = input.trim();
-    console.debug('Custom content import started', url);
+async function downloadCharacter(fullPath) {
+    console.debug('Custom content import started', fullPath);
     let request = null;
     
     try {
-        // try /api/content/import first and then /import_custom
+        // Send the fullPath directly to the /importUUID endpoint
         request = await fetch('/api/content/importUUID', {
             method: 'POST',
             headers: getRequestHeaders(),
-            body: JSON.stringify({ "url":url }),
+            body: JSON.stringify({ "url": fullPath }),
         });
     } catch (error) {
         console.error('Network error during character import:', error);
@@ -73,12 +71,8 @@ async function downloadCharacter(input, fullPath = null) {
     }
 
     if (!request.ok) {
-        // Use the provided fullPath if available, otherwise try to construct it
-        let fallbackUrl;
-        if (fullPath) {
-            // Use the fullPath from search results
-            fallbackUrl = `https://www.chub.ai/characters/${fullPath}`;
-        }
+        // Construct the character page URL for fallback
+        const fallbackUrl = `https://www.chub.ai/characters/${fullPath}`;
         
         toastr.info("Click to go to the character page", 'Custom content import failed', {onclick: () => window.open(fallbackUrl, '_blank') });
         console.error('Custom content import failed', request.status, request.statusText);
@@ -484,29 +478,19 @@ async function displayCharactersInListViewPopup() {
 
     characterListContainer.addEventListener('click', async function (event) {
         if (event.target.classList.contains('download-btn')) {
-            const characterId = event.target.getAttribute('data-id');
             const fullPath = event.target.getAttribute('data-path');
             
-            // Add validation to ensure node.id exists before using it
-            if (characterId && characterId !== 'null' && characterId !== 'undefined') {
-                const downloadUrl = `https://gateway.chub.ai/api/v4/projects/${characterId}/repository/files/card.png/raw?ref=main&response_type=blob`;
+            // Validate that fullPath exists before attempting download
+            if (fullPath && fullPath !== 'null' && fullPath !== 'undefined') {
                 try {
-                    await downloadCharacter(downloadUrl, fullPath);
-                } catch (error) {
-                    console.error('Error downloading character:', error);
-                    toastr.error('Failed to download character');
-                }
-            } else if (fullPath) {
-                // Fallback to using fullPath if no ID available
-                try {
-                    await downloadCharacter(fullPath, fullPath);
+                    await downloadCharacter(fullPath);
                 } catch (error) {
                     console.error('Error downloading character:', error);
                     toastr.error('Failed to download character');
                 }
             } else {
-                console.error('No character ID or path available for download');
-                toastr.error('Cannot download character - missing information');
+                console.error('No character path available for download');
+                toastr.error('Cannot download character - missing path information');
             }
         }
     });
