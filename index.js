@@ -51,27 +51,21 @@ async function loadSettings() {
 /**
  * Downloads a custom character based on the provided URL.
  * @param {string} input - A string containing the URL of the character to be downloaded.
+ * @param {string} fullPath - The full path of the character from search results (e.g., "user/character-name")
  * @returns {Promise<void>} - Resolves once the character has been processed or if an error occurs.
  */
-async function downloadCharacter(input) {
+async function downloadCharacter(input, fullPath = null) {
     const url = input.trim();
     console.debug('Custom content import started', url);
     let request = null;
     
     try {
         // try /api/content/import first and then /import_custom
-        request = await fetch('/api/content/importUUID', {
+        request = await fetch('/importUUID', {
             method: 'POST',
             headers: getRequestHeaders(),
             body: JSON.stringify({ url }),
         });
-        if (!request.ok) {
-            request = await fetch('/import_custom', {
-                method: 'POST',
-                headers: getRequestHeaders(),
-                body: JSON.stringify({ url }),
-            });
-        }
     } catch (error) {
         console.error('Network error during character import:', error);
         toastr.error('Network error during character import');
@@ -79,19 +73,14 @@ async function downloadCharacter(input) {
     }
 
     if (!request.ok) {
-        // Fix URL parameter issue - extract character path from full URL if needed
-        let characterPath = url;
-        try {
-            const urlObj = new URL(url);
-            // Extract character path from URL like https://www.chub.ai/characters/user/character
-            const pathMatch = urlObj.pathname.match(/\/characters\/(.+)/);
-            if (pathMatch) {
-                characterPath = pathMatch[1];
-            }
-        } catch (e) {
-            // If URL parsing fails, assume it's already a path
+        // Use the provided fullPath if available, otherwise try to construct it
+        let fallbackUrl;
+        if (fullPath) {
+            // Use the fullPath from search results
+            fallbackUrl = `https://www.chub.ai/characters/${fullPath}`;
         }
-        toastr.info("Click to go to the character page", 'Custom content import failed', {onclick: () => window.open(`https://www.chub.ai/characters/${characterPath}`, '_blank') });
+        
+        toastr.info("Click to go to the character page", 'Custom content import failed', {onclick: () => window.open(fallbackUrl, '_blank') });
         console.error('Custom content import failed', request.status, request.statusText);
         return;
     }
@@ -163,7 +152,7 @@ async function fetchCharactersBySearch({ searchTerm, includeTags, excludeTags, n
 
     // Construct the URL with the search parameters, if any
     //
-    let url = `${API_ENDPOINT_SEARCH}?${searchTerm}first=${first}&page=${page}&sort=${sort}&asc=${asc}&venus=true&include_forks=${include_forks}&nsfw=${nsfw}&require_images=${require_images}&require_custom_prompt=${require_custom_prompt}`;
+    let url = `${API_ENDPOINT_SEARCH}?namespace=characters&${searchTerm}first=${first}&page=${page}&sort=${sort}&asc=${asc}&venus=true&include_forks=${include_forks}&nsfw=${nsfw}&require_images=${require_images}&require_custom_prompt=${require_custom_prompt}`;
 
     //truncate include and exclude tags to 100 characters
     includeTags = includeTags.filter(tag => tag.length > 0);
@@ -502,7 +491,7 @@ async function displayCharactersInListViewPopup() {
             if (characterId && characterId !== 'null' && characterId !== 'undefined') {
                 const downloadUrl = `https://gateway.chub.ai/api/v4/projects/${characterId}/repository/files/card.png/raw?ref=main&response_type=blob`;
                 try {
-                    await downloadCharacter(downloadUrl);
+                    await downloadCharacter(downloadUrl, fullPath);
                 } catch (error) {
                     console.error('Error downloading character:', error);
                     toastr.error('Failed to download character');
@@ -510,7 +499,7 @@ async function displayCharactersInListViewPopup() {
             } else if (fullPath) {
                 // Fallback to using fullPath if no ID available
                 try {
-                    await downloadCharacter(fullPath);
+                    await downloadCharacter(fullPath, fullPath);
                 } catch (error) {
                     console.error('Error downloading character:', error);
                     toastr.error('Failed to download character');
