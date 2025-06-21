@@ -61,10 +61,10 @@ async function downloadCharacter(input, fullPath = null) {
     
     try {
         // try /api/content/import first and then /import_custom
-        request = await fetch('/importUUID', {
+        request = await fetch('/api/content/importUUID', {
             method: 'POST',
             headers: getRequestHeaders(),
-            body: JSON.stringify({ url }),
+            body: JSON.stringify({ "url":url }),
         });
     } catch (error) {
         console.error('Network error during character import:', error);
