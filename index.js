@@ -5,15 +5,13 @@ import {
     processDroppedFiles,
     callPopup
 } from "../../../../script.js";
-import { delay, debounce } from "../../../utils.js";
+import { debounce } from "../../../utils.js";
 import { extension_settings } from "../../../extensions.js";
 
 const extensionName = "SillyTavern-Chub-Search";
-const extensionFolderPath = `scripts/extensions/${extensionName}/`;
 
 // Endpoint for API call
-const API_ENDPOINT_SEARCH = "https://api.chub.ai/api/characters/search";
-const API_ENDPOINT_DOWNLOAD = "https://api.chub.ai/api/characters/download";
+const API_ENDPOINT_SEARCH = "https://gateway.chub.ai/search";
 
 const defaultSettings = {
     findCount: 10,
@@ -59,29 +57,64 @@ async function downloadCharacter(input) {
     const url = input.trim();
     console.debug('Custom content import started', url);
     let request = null;
-    // try /api/content/import first and then /import_custom
-    request = await fetch('/api/content/importUUID', {
-        method: 'POST',
-        headers: getRequestHeaders(),
-        body: JSON.stringify({ url }),
-    });
-    if (!request.ok) {  
-        request = await fetch('/import_custom', {
+    
+    try {
+        // try /api/content/import first and then /import_custom
+        request = await fetch('/api/content/importUUID', {
             method: 'POST',
             headers: getRequestHeaders(),
             body: JSON.stringify({ url }),
         });
+        if (!request.ok) {
+            request = await fetch('/import_custom', {
+                method: 'POST',
+                headers: getRequestHeaders(),
+                body: JSON.stringify({ url }),
+            });
+        }
+    } catch (error) {
+        console.error('Network error during character import:', error);
+        toastr.error('Network error during character import');
+        return;
     }
 
     if (!request.ok) {
-        toastr.info("Click to go to the character page", 'Custom content import failed', {onclick: () => window.open(`https://www.chub.ai/characters/${url}`, '_blank') });
+        // Fix URL parameter issue - extract character path from full URL if needed
+        let characterPath = url;
+        try {
+            const urlObj = new URL(url);
+            // Extract character path from URL like https://www.chub.ai/characters/user/character
+            const pathMatch = urlObj.pathname.match(/\/characters\/(.+)/);
+            if (pathMatch) {
+                characterPath = pathMatch[1];
+            }
+        } catch (e) {
+            // If URL parsing fails, assume it's already a path
+        }
+        toastr.info("Click to go to the character page", 'Custom content import failed', {onclick: () => window.open(`https://www.chub.ai/characters/${characterPath}`, '_blank') });
         console.error('Custom content import failed', request.status, request.statusText);
         return;
     }
 
-    const data = await request.blob();
+    let data;
+    try {
+        data = await request.blob();
+    } catch (error) {
+        console.error('Error reading response data:', error);
+        toastr.error('Failed to process character data');
+        return;
+    }
+    
     const customContentType = request.headers.get('X-Custom-Content-Type');
-    const fileName = request.headers.get('Content-Disposition').split('filename=')[1].replace(/"/g, '');
+    const contentDisposition = request.headers.get('Content-Disposition');
+    
+    if (!contentDisposition || !contentDisposition.includes('filename=')) {
+        console.error('Missing or invalid Content-Disposition header');
+        toastr.error('Invalid response from server');
+        return;
+    }
+    
+    const fileName = contentDisposition.split('filename=')[1].replace(/"/g, '');
     const file = new File([data], fileName, { type: data.type });
 
     switch (customContentType) {
@@ -105,25 +138,6 @@ function updateCharacterListInView(characters) {
     }
 }
 
-/**
- * Generates a list of permutations for the given tags. The permutations include:
- * - Original tag.
- * - Tag in uppercase.
- * - Tag with the first letter in uppercase.
- * @param {Array<string>} tags - List of tags for which permutations are to be generated.
- * @returns {Array<string>} - A list containing all the tag permutations.
- */
-function makeTagPermutations(tags) {
-    let permutations = [];
-    for (let tag of tags) {
-        if(tag) {
-            permutations.push(tag);
-            permutations.push(tag.toUpperCase());
-            permutations.push(tag[0].toUpperCase() + tag.slice(1));
-        }
-    }
-    return permutations;
-}
 
 /**
  * Fetches characters based on specified search criteria.
@@ -148,46 +162,101 @@ async function fetchCharactersBySearch({ searchTerm, includeTags, excludeTags, n
     sort = sort || 'download_count';
 
     // Construct the URL with the search parameters, if any
-    // 
+    //
     let url = `${API_ENDPOINT_SEARCH}?${searchTerm}first=${first}&page=${page}&sort=${sort}&asc=${asc}&venus=true&include_forks=${include_forks}&nsfw=${nsfw}&require_images=${require_images}&require_custom_prompt=${require_custom_prompt}`;
 
     //truncate include and exclude tags to 100 characters
     includeTags = includeTags.filter(tag => tag.length > 0);
     if (includeTags && includeTags.length > 0) {
-        //includeTags = makeTagPermutations(includeTags);
         includeTags = includeTags.join(',').slice(0, 100);
         url += `&tags=${encodeURIComponent(includeTags)}`;
     }
     //remove tags that contain no characters
     excludeTags = excludeTags.filter(tag => tag.length > 0);
     if (excludeTags && excludeTags.length > 0) {
-        //excludeTags = makeTagPermutations(excludeTags);
         excludeTags = excludeTags.join(',').slice(0, 100);
         url += `&exclude_tags=${encodeURIComponent(excludeTags)}`;
     }
 
-    let searchResponse = await fetch(url);
-
-    let searchData = await searchResponse.json();
+    let searchResponse;
+    let searchData;
+    
+    try {
+        searchResponse = await fetch(url);
+        if (!searchResponse.ok) {
+            console.error('Search request failed', searchResponse.status, searchResponse.statusText);
+            toastr.error(`Search failed: ${searchResponse.statusText}`);
+            return chubCharacters;
+        }
+        searchData = await searchResponse.json();
+    } catch (error) {
+        console.error('Error fetching search data:', error);
+        toastr.error('Failed to search characters. Please check your connection.');
+        return chubCharacters;
+    }
 
     // Clear previous search results
     chubCharacters = [];
 
-    if (searchData.nodes.length === 0) {
+    // Add comprehensive validation check for searchData existence and structure
+    if (!searchData) {
+        console.warn('No search data received');
         return chubCharacters;
     }
-    let charactersPromises = searchData.nodes.map(node => getCharacter(node.fullPath));
-    let characterBlobs = await Promise.all(charactersPromises);
+    
+    if (!searchData.data) {
+        console.warn('Search data missing data property');
+        return chubCharacters;
+    }
+    
+    if (!searchData.data.nodes || !Array.isArray(searchData.data.nodes)) {
+        console.warn('Search data missing nodes array');
+        return chubCharacters;
+    }
+    
+    if (searchData.data.nodes.length === 0) {
+        console.log('No characters found in search results');
+        return chubCharacters;
+    }
+    
+    // Process characters with proper error handling
+    let charactersPromises = searchData.data.nodes.map(node => getCharacter(node));
+    let characterBlobs;
+    
+    try {
+        characterBlobs = await Promise.all(charactersPromises);
+    } catch (error) {
+        console.error('Error fetching character avatars:', error);
+        toastr.error('Failed to load some character images');
+        return chubCharacters;
+    }
 
     characterBlobs.forEach((character, i) => {
-        let imageUrl = URL.createObjectURL(character);
+        if (!character) return; // Skip if character blob is null
+        
+        const node = searchData.data.nodes[i];
+        if (!node) return; // Skip if node is null
+        
+        let imageUrl;
+        try {
+            imageUrl = URL.createObjectURL(character);
+        } catch (error) {
+            console.error('Error creating object URL for character image:', error);
+            return; // Skip this character
+        }
+        
+        // Add defensive null checks for node properties
+        const fullPath = node.fullPath || '';
+        const author = fullPath ? fullPath.split('/')[0] : 'Unknown';
+        
         chubCharacters.push({
             url: imageUrl,
-            description: searchData.nodes[i].tagline || "Description here...",
-            name: searchData.nodes[i].name,
-            fullPath: searchData.nodes[i].fullPath,
-            tags: searchData.nodes[i].topics,
-            author: searchData.nodes[i].fullPath.split('/')[0],
+            description: node.tagline || node.description || "No description available",
+            name: node.name || "Unknown Character",
+            fullPath: fullPath,
+            tags: Array.isArray(node.topics) ? node.topics : [],
+            author: author,
+            id: node.id || null,
         });
     });
 
@@ -250,19 +319,27 @@ async function executeCharacterSearch(options) {
  * @returns {string} - Returns an HTML string representation of the character list item.
  */
 function generateCharacterListItem(character, index) {
+    // Defensive checks for character properties
+    const safeName = character.name || "Unknown Character";
+    const safeAuthor = character.author || "Unknown";
+    const safeDescription = character.description || "No description available";
+    const safeTags = Array.isArray(character.tags) ? character.tags : [];
+    const safeFullPath = character.fullPath || "";
+    const safeId = character.id || "";
+    
     return `
         <div class="character-list-item" data-index="${index}">
-            <img class="thumbnail" src="${character.url}">
+            <img class="thumbnail" src="${character.url}" onerror="this.src='data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 width=%22100%22 height=%22100%22><rect width=%22100%22 height=%22100%22 fill=%22%23ccc%22/><text x=%2250%%22 y=%2250%%22 dominant-baseline=%22middle%22 text-anchor=%22middle%22 fill=%22%23666%22>No Image</text></svg>'">
             <div class="info">
                 
-                <a href="https://chub.ai/characters/${character.fullPath}" target="_blank"><div class="name">${character.name || "Default Name"}</a>
-                <a href="https://chub.ai/users/${character.author}" target="_blank">
-                 <span class="author">by ${character.author}</span>
+                <a href="https://chub.ai/characters/${safeFullPath}" target="_blank"><div class="name">${safeName}</a>
+                <a href="https://chub.ai/users/${safeAuthor}" target="_blank">
+                 <span class="author">by ${safeAuthor}</span>
                 </a></div>
-                <div class="description">${character.description}</div>
-                <div class="tags">${character.tags.map(tag => `<span class="tag">${tag}</span>`).join('')}</div>
+                <div class="description">${safeDescription}</div>
+                <div class="tags">${safeTags.map(tag => `<span class="tag">${tag}</span>`).join('')}</div>
             </div>
-            <div data-path="${character.fullPath}" class="menu_button download-btn fa-solid fa-cloud-arrow-down faSmallFontSquareFix"></div>
+            <div data-path="${safeFullPath}" data-id="${safeId}" class="menu_button download-btn fa-solid fa-cloud-arrow-down faSmallFontSquareFix"></div>
         </div>
     `;
 }
@@ -372,11 +449,15 @@ async function displayCharactersInListViewPopup() {
     let clone = null;  // Store reference to the cloned image
 
     characterListContainer.addEventListener('click', function (event) {
-        if (event.target.tagName === 'IMG') {
+        if (event.target.tagName === 'IMG' && event.target.classList.contains('thumbnail')) {
             const image = event.target;
 
             if (clone) {  // If clone exists, remove it
-                document.body.removeChild(clone);
+                try {
+                    document.body.removeChild(clone);
+                } catch (error) {
+                    console.error('Error removing image clone:', error);
+                }
                 clone = null;
                 return;  // Exit the function
             }
@@ -390,6 +471,7 @@ async function displayCharactersInListViewPopup() {
             clone.style.transform = 'scale(4)';  // Enlarge by 4 times
             clone.style.zIndex = 99999;  // High value to ensure it's above other elements
             clone.style.objectFit = 'contain';
+            clone.style.cursor = 'pointer';
 
             document.body.appendChild(clone);
 
@@ -401,7 +483,11 @@ async function displayCharactersInListViewPopup() {
     // Add event listener to remove the clone on next click anywhere
     document.addEventListener('click', function handler() {
         if (clone) {
-            document.body.removeChild(clone);
+            try {
+                document.body.removeChild(clone);
+            } catch (error) {
+                console.error('Error removing image clone:', error);
+            }
             clone = null;
         }
     });
@@ -409,7 +495,30 @@ async function displayCharactersInListViewPopup() {
 
     characterListContainer.addEventListener('click', async function (event) {
         if (event.target.classList.contains('download-btn')) {
-            downloadCharacter(event.target.getAttribute('data-path'));
+            const characterId = event.target.getAttribute('data-id');
+            const fullPath = event.target.getAttribute('data-path');
+            
+            // Add validation to ensure node.id exists before using it
+            if (characterId && characterId !== 'null' && characterId !== 'undefined') {
+                const downloadUrl = `https://gateway.chub.ai/api/v4/projects/${characterId}/repository/files/card.png/raw?ref=main&response_type=blob`;
+                try {
+                    await downloadCharacter(downloadUrl);
+                } catch (error) {
+                    console.error('Error downloading character:', error);
+                    toastr.error('Failed to download character');
+                }
+            } else if (fullPath) {
+                // Fallback to using fullPath if no ID available
+                try {
+                    await downloadCharacter(fullPath);
+                } catch (error) {
+                    console.error('Error downloading character:', error);
+                    toastr.error('Failed to download character');
+                }
+            } else {
+                console.error('No character ID or path available for download');
+                toastr.error('Cannot download character - missing information');
+            }
         }
     });
 
@@ -506,37 +615,55 @@ async function displayCharactersInListViewPopup() {
  * @param {string} fullPath - The unique path/reference for the character to be fetched.
  * @returns {Promise<Blob>} - Resolves with a Blob of the fetched character data.
  */
-async function getCharacter(fullPath) {
-    let response = await fetch(
-        API_ENDPOINT_DOWNLOAD,
-        {
-            method: "POST",
-            headers: {
-                'Content-Type': 'application/json'
-            },
-            body: JSON.stringify({
-                fullPath: fullPath,
-                format: "tavern",
-                version: "main"
-            }),
-        }
-    );
-
-    // If the request failed, try a backup endpoint - https://avatars.charhub.io/{fullPath}/avatar.webp
-    if (!response.ok) {
-        console.log(`Request failed for ${fullPath}, trying backup endpoint`);
-        response = await fetch(
-            `https://avatars.charhub.io/avatars/${fullPath}/avatar.webp`,
+async function getCharacter(node) {
+    // Add proper error handling for missing required fields
+    if (!node) {
+        console.error('Invalid node data - node is null or undefined');
+        return null;
+    }
+    
+    if (!node.fullPath) {
+        console.error('Invalid node data - missing fullPath', node);
+        return null;
+    }
+    
+    // URL-encode the fullPath when constructing avatar URLs to handle special characters
+    const encodedFullPath = encodeURIComponent(node.fullPath);
+    
+    // Use the avatar_url from the node if available, otherwise construct it
+    // Note: Removed outdated API endpoint fallback
+    const avatarUrl = node.avatar_url || `https://avatars.charhub.io/avatars/${encodedFullPath}/avatar.webp`;
+    
+    try {
+        const response = await fetch(
+            avatarUrl,
             {
                 method: "GET",
                 headers: {
-                    'Content-Type': 'application/json'
+                    'Accept': 'image/*'
                 },
             }
         );
+
+        if (!response.ok) {
+            console.error(`Failed to fetch avatar for ${node.fullPath}:`, response.status, response.statusText);
+            // Try to return a placeholder or null
+            return null;
+        }
+        
+        const contentType = response.headers.get('content-type');
+        if (!contentType || !contentType.startsWith('image/')) {
+            console.error(`Invalid content type for avatar: ${contentType}`);
+            return null;
+        }
+        
+        const data = await response.blob();
+        return data;
+    } catch (error) {
+        console.error(`Error fetching character avatar for ${node.fullPath}:`, error);
+        // Network errors, timeouts, etc.
+        return null;
     }
-    let data = await response.blob();
-    return data;
 }
 
 /**
